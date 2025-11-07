@@ -11,6 +11,7 @@ interface MapComponentProps {
   searchDestination?: { lat: number; lng: number; address: string };
   waypoints?: Array<{ lat: number; lng: number; address: string }>;
   isDrawingCustomRoute?: boolean;
+  currentPath?: LatLng[]; // Path to display on map
   onDestinationChange?: (dest: LatLng) => void;
   onPathChange?: (path: LatLng[]) => void;
   onCustomDrawComplete?: () => void;
@@ -27,6 +28,7 @@ export default function MapComponent({
   searchDestination,
   waypoints = [],
   isDrawingCustomRoute,
+  currentPath,
   onDestinationChange,
   onPathChange,
   onCustomDrawComplete,
@@ -35,6 +37,7 @@ export default function MapComponent({
   const [map, setMap] = useState<google.maps.Map | null>(null);
   const [marker, setMarker] = useState<google.maps.Marker | null>(null);
   const [polyline, setPolyline] = useState<google.maps.Polyline | null>(null);
+  const polylineRef = useRef<google.maps.Polyline | null>(null);
   const [drawingPath, setDrawingPath] = useState<LatLng[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [waitingForStart, setWaitingForStart] = useState(false);
@@ -80,31 +83,56 @@ export default function MapComponent({
     const newOriginMarker = new google.maps.Marker({
       position: { lat: searchOrigin.lat, lng: searchOrigin.lng },
       map,
-      title: "Origin: " + searchOrigin.address,
+      title: isDrawingCustomRoute && waitingForStart 
+        ? "Click here to start drawing your route!" 
+        : "Origin: " + searchOrigin.address,
       label: {
         text: "A",
         color: "white",
         fontWeight: "bold",
+        fontSize: isDrawingCustomRoute && waitingForStart ? "14px" : "12px",
       },
       icon: {
         path: google.maps.SymbolPath.CIRCLE,
-        scale: 10,
-        fillColor: "#4285F4",
+        scale: isDrawingCustomRoute && waitingForStart ? 14 : 10, // Larger when waiting for click
+        fillColor: isDrawingCustomRoute && waitingForStart ? "#1E90FF" : "#4285F4", // Brighter blue when waiting
         fillOpacity: 1,
         strokeColor: "white",
-        strokeWeight: 2,
+        strokeWeight: isDrawingCustomRoute && waitingForStart ? 3 : 2, // Thicker border when waiting
       },
+      cursor: isDrawingCustomRoute && waitingForStart ? "pointer" : "default",
+      clickable: true,
+      zIndex: isDrawingCustomRoute && waitingForStart ? 1000 : undefined, // Bring to front when waiting
     });
 
+    // Add click listener to origin marker when in drawing mode
+    let markerClickListener: google.maps.MapsEventListener | null = null;
+    if (isDrawingCustomRoute && waitingForStart) {
+      markerClickListener = newOriginMarker.addListener("click", (e: google.maps.MapMouseEvent) => {
+        e.stop(); // Prevent event propagation
+        // Start drawing from origin when marker is clicked
+        if (map && searchOrigin && searchDestination) {
+          startDrawingFromOrigin();
+        }
+      });
+    }
+
     setOriginMarker(newOriginMarker);
-    map.setCenter({ lat: searchOrigin.lat, lng: searchOrigin.lng });
-    map.setZoom(15);
+    
+    // Only auto-center if not in drawing mode
+    if (!isDrawingCustomRoute) {
+      map.setCenter({ lat: searchOrigin.lat, lng: searchOrigin.lng });
+      map.setZoom(15);
+    }
 
     return () => {
+      if (markerClickListener) {
+        google.maps.event.removeListener(markerClickListener);
+      }
       newOriginMarker.setMap(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [map, searchOrigin]);
+  }, [map, searchOrigin, isDrawingCustomRoute, waitingForStart]);
 
   // Handle destination search location
   useEffect(() => {
@@ -186,6 +214,7 @@ export default function MapComponent({
         map,
       });
       setPolyline(newPolyline);
+      polylineRef.current = newPolyline;
 
       // Fit bounds to show entire route
       const bounds = new google.maps.LatLngBounds();
@@ -200,9 +229,57 @@ export default function MapComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, mode, destination, encodedPath]);
 
-  // Create mode: Handle destination selection
+  // Create mode: Display path when currentPath is set (but not during custom drawing)
   useEffect(() => {
-    if (!map || mode !== "create") return;
+    // Don't interfere with custom drawing mode
+    if (!map || mode !== "create" || isDrawingCustomRoute || waitingForStart || isDrawing) {
+      return;
+    }
+
+    if (!currentPath || currentPath.length < 2) {
+      // Clear polyline if path is invalid (but only if not drawing)
+      if (polylineRef.current && (!currentPath || currentPath.length < 2)) {
+        polylineRef.current.setMap(null);
+        setPolyline(null);
+        polylineRef.current = null;
+      }
+      return;
+    }
+
+    // Clear existing polyline
+    if (polylineRef.current) {
+      polylineRef.current.setMap(null);
+    }
+
+    // Create new polyline with the path
+    const googlePath = currentPath.map(p => new google.maps.LatLng(p.lat, p.lng));
+    const newPolyline = new google.maps.Polyline({
+      path: googlePath,
+      strokeColor: "#4285F4",
+      strokeWeight: 4,
+      map,
+    });
+
+    setPolyline(newPolyline);
+    polylineRef.current = newPolyline;
+
+    // Fit bounds to show entire route
+    const bounds = new google.maps.LatLngBounds();
+    currentPath.forEach((point) => {
+      bounds.extend({ lat: point.lat, lng: point.lng });
+    });
+    map.fitBounds(bounds);
+
+    return () => {
+      if (newPolyline) {
+        newPolyline.setMap(null);
+      }
+    };
+  }, [map, mode, currentPath, isDrawingCustomRoute, waitingForStart, isDrawing]);
+
+  // Create mode: Handle destination selection (disabled when drawing custom route)
+  useEffect(() => {
+    if (!map || mode !== "create" || isDrawingCustomRoute) return;
 
     const clickListener = map.addListener("click", (e: google.maps.MapMouseEvent) => {
       if (!e.latLng) return;
@@ -228,7 +305,7 @@ export default function MapComponent({
     return () => {
       google.maps.event.removeListener(clickListener);
     };
-  }, [map, mode, marker, onDestinationChange]);
+  }, [map, mode, marker, onDestinationChange, isDrawingCustomRoute]);
 
   const snapPathToRoads = useCallback(async (path: LatLng[]) => {
     try {
@@ -244,8 +321,8 @@ export default function MapComponent({
       const snappedPath = data.path;
 
       // Update polyline with snapped path
-      if (polyline) {
-        polyline.setPath(snappedPath);
+      if (polylineRef.current) {
+        polylineRef.current.setPath(snappedPath);
       }
 
       setDrawingPath(snappedPath);
@@ -273,17 +350,18 @@ export default function MapComponent({
         map.fitBounds(bounds);
       }
     }
-  }, [polyline, onPathChange, map]);
+  }, [onPathChange, map]);
 
   // Handle custom drawing mode activation - change cursor to pencil immediately
   useEffect(() => {
-    if (!map || !isDrawingCustomRoute || !isMapStable) {
+    if (!map || !isDrawingCustomRoute) {
       // Reset cursor when not drawing
       if (map && !isDrawingCustomRoute) {
         map.setOptions({ draggable: true });
         // Remove cursor style from map container and all children
         if (mapRef.current) {
           mapRef.current.style.cursor = "";
+          mapRef.current.classList.remove("drawing-mode");
           const mapDiv = map.getDiv();
           if (mapDiv) {
             mapDiv.style.cursor = "";
@@ -302,25 +380,47 @@ export default function MapComponent({
     if (polyline) {
       polyline.setMap(null);
       setPolyline(null);
+      polylineRef.current = null;
     }
     
     // Disable map dragging and set cursor
     map.setOptions({ draggable: false });
     
+    // Add CSS class to map container for cursor styling
+    if (mapRef.current) {
+      mapRef.current.classList.add("drawing-mode");
+    }
+    
     // Function to apply crosshair cursor to all elements
     const applyCrosshairCursor = () => {
       if (!mapRef.current) return;
+      
+      // Set on the map container itself first
+      mapRef.current.style.cursor = "crosshair";
+      mapRef.current.style.setProperty("cursor", "crosshair", "important");
+      
       const mapDiv = map.getDiv();
       if (mapDiv) {
+        // Force cursor on the main map div
         mapDiv.style.cursor = "crosshair";
         mapDiv.style.setProperty("cursor", "crosshair", "important");
+        
         // Set cursor on all child elements (especially the canvas)
         const allElements = mapDiv.querySelectorAll("*");
         allElements.forEach((el: Element) => {
           const htmlEl = el as HTMLElement;
-          htmlEl.style.cursor = "crosshair";
-          htmlEl.style.setProperty("cursor", "crosshair", "important");
+          if (htmlEl && htmlEl.style) {
+            htmlEl.style.cursor = "crosshair";
+            htmlEl.style.setProperty("cursor", "crosshair", "important");
+          }
         });
+        
+        // Also try to find and set cursor on the canvas specifically
+        const canvas = mapDiv.querySelector("canvas");
+        if (canvas) {
+          canvas.style.cursor = "crosshair";
+          canvas.style.setProperty("cursor", "crosshair", "important");
+        }
       }
     };
     
@@ -328,10 +428,13 @@ export default function MapComponent({
     applyCrosshairCursor();
     
     // Continuously reapply cursor (Google Maps might reset it)
-    const cursorInterval = setInterval(applyCrosshairCursor, 100);
+    const cursorInterval = setInterval(applyCrosshairCursor, 50);
     
     // Also apply on mouse move (most reliable)
-    const cursorMouseMove = map.addListener("mousemove", applyCrosshairCursor);
+    let cursorMouseMove: google.maps.MapsEventListener | null = null;
+    if (isMapStable) {
+      cursorMouseMove = map.addListener("mousemove", applyCrosshairCursor);
+    }
     
     // Start the drawing process - wait for user to click on map
     setWaitingForStart(true);
@@ -340,47 +443,228 @@ export default function MapComponent({
     
     return () => {
       clearInterval(cursorInterval);
-      google.maps.event.removeListener(cursorMouseMove);
+      if (cursorMouseMove) {
+        google.maps.event.removeListener(cursorMouseMove);
+      }
+      if (mapRef.current) {
+        mapRef.current.classList.remove("drawing-mode");
+      }
     };
   }, [map, isDrawingCustomRoute, isMapStable, polyline]);
 
-  // Handle waiting for start point - user clicks on map to start drawing
+  // Shared function to start drawing from origin
+  const startDrawingFromOrigin = useCallback(() => {
+    if (!map || !searchOrigin || !searchDestination) return;
+
+    setWaitingForStart(false);
+    setIsDrawing(true);
+    
+    // Start path from origin
+    const startPath = [{ lat: searchOrigin.lat, lng: searchOrigin.lng }];
+    setDrawingPath(startPath);
+    
+    // Zoom to 70% (zoom level 15 is approximately 70% zoom)
+    map.setZoom(15);
+    
+    // Center map on origin
+    map.setCenter({ lat: searchOrigin.lat, lng: searchOrigin.lng });
+    
+    // Create polyline starting from origin
+    const googlePath = startPath.map(p => new google.maps.LatLng(p.lat, p.lng));
+    const newPolyline = new google.maps.Polyline({
+      path: googlePath,
+      strokeColor: "#4285F4",
+      strokeWeight: 4,
+      map,
+    });
+    setPolyline(newPolyline);
+    polylineRef.current = newPolyline;
+
+    // Set up drag listeners - start listening immediately for mousemove
+    let isDragging = false;
+    let moveListener: google.maps.MapsEventListener | null = null;
+    let mouseUpListener: google.maps.MapsEventListener | null = null;
+    let globalMouseUpHandler: ((e: MouseEvent) => void) | null = null;
+
+    const finishDrawing = () => {
+      // Get current path from polyline
+      let currentPath: LatLng[] = [];
+      if (polylineRef.current) {
+        const path = polylineRef.current.getPath();
+        currentPath = Array.from(path.getArray()).map((latLng: google.maps.LatLng) => ({
+          lat: latLng.lat(),
+          lng: latLng.lng(),
+        }));
+      } else {
+        currentPath = drawingPath;
+      }
+      
+      // Ensure path ends at destination
+      let finalPath = currentPath.length > 0 ? currentPath : drawingPath;
+      if (searchDestination && finalPath.length > 0) {
+        const lastPoint = finalPath[finalPath.length - 1];
+        const distanceToDest = Math.sqrt(
+          Math.pow(lastPoint.lat - searchDestination.lat, 2) + 
+          Math.pow(lastPoint.lng - searchDestination.lng, 2)
+        );
+        
+        if (distanceToDest > 0.001) {
+          finalPath = [...finalPath, { lat: searchDestination.lat, lng: searchDestination.lng }];
+        }
+      }
+      
+      // Ensure path starts from origin
+      if (searchOrigin && finalPath.length > 0) {
+        const firstPoint = finalPath[0];
+        const distanceToOrigin = Math.sqrt(
+          Math.pow(firstPoint.lat - searchOrigin.lat, 2) + 
+          Math.pow(firstPoint.lng - searchOrigin.lng, 2)
+        );
+        
+        if (distanceToOrigin > 0.001) {
+          finalPath = [{ lat: searchOrigin.lat, lng: searchOrigin.lng }, ...finalPath];
+        }
+      }
+      
+      // Update polyline with final path
+      if (polylineRef.current && finalPath.length > 0) {
+        const googlePath = finalPath.map(p => new google.maps.LatLng(p.lat, p.lng));
+        polylineRef.current.setPath(googlePath);
+      }
+      
+      // Snap to roads and update
+      if (finalPath.length > 1) {
+        snapPathToRoads(finalPath);
+      } else if (finalPath.length > 0) {
+        onPathChange?.(finalPath);
+      }
+      
+      // Notify parent that custom drawing is complete
+      if (onCustomDrawComplete) {
+        onCustomDrawComplete();
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (!isDragging) return;
+      isDragging = false;
+      setIsDrawing(false);
+      
+      // Clean up listeners
+      if (moveListener) {
+        google.maps.event.removeListener(moveListener);
+        moveListener = null;
+      }
+      if (mouseUpListener) {
+        google.maps.event.removeListener(mouseUpListener);
+        mouseUpListener = null;
+      }
+      if (globalMouseUpHandler) {
+        document.removeEventListener("mouseup", globalMouseUpHandler);
+        globalMouseUpHandler = null;
+      }
+      
+      // Finish drawing and snap to roads
+      finishDrawing();
+    };
+
+    // Listen for mouse move while dragging (starts immediately after clicking origin)
+    moveListener = map.addListener("mousemove", (moveEvent: google.maps.MapMouseEvent) => {
+      if (!isDragging || !moveEvent.latLng) return;
+      
+      const lat = moveEvent.latLng.lat();
+      const lng = moveEvent.latLng.lng();
+      
+      setDrawingPath((prev) => {
+        // Only add point if it's different enough from the last point
+        if (prev.length > 0) {
+          const lastAdded = prev[prev.length - 1];
+          const distance = Math.sqrt(
+            Math.pow(lat - lastAdded.lat, 2) + 
+            Math.pow(lng - lastAdded.lng, 2)
+          );
+          
+          // Minimum distance threshold (~5 meters)
+          if (distance < 0.00005) {
+            return prev; // Don't add if too close
+          }
+        }
+        
+        const newPath = [...prev, { lat, lng }];
+        
+        // Update polyline in real-time
+        if (polylineRef.current) {
+          const googlePath = newPath.map(p => new google.maps.LatLng(p.lat, p.lng));
+          polylineRef.current.setPath(googlePath);
+        }
+        
+        return newPath;
+      });
+    });
+
+    // Listen for mousedown to start dragging
+    const mouseDownListener = map.addListener("mousedown", (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      isDragging = true;
+    });
+
+    // Listen for mouse up on map
+    mouseUpListener = map.addListener("mouseup", handleMouseUp);
+    
+    // Also listen globally in case mouse is released outside map
+    globalMouseUpHandler = handleMouseUp;
+    document.addEventListener("mouseup", globalMouseUpHandler);
+
+    // Cleanup function
+    return () => {
+      if (moveListener) {
+        google.maps.event.removeListener(moveListener);
+      }
+      if (mouseDownListener) {
+        google.maps.event.removeListener(mouseDownListener);
+      }
+      if (mouseUpListener) {
+        google.maps.event.removeListener(mouseUpListener);
+      }
+      if (globalMouseUpHandler) {
+        document.removeEventListener("mouseup", globalMouseUpHandler);
+      }
+    };
+  }, [map, searchOrigin, searchDestination, drawingPath, snapPathToRoads, onPathChange, onCustomDrawComplete]);
+
+  // Handle waiting for start point - user can click on origin marker or map
   useEffect(() => {
-    if (!map || mode !== "create" || !waitingForStart || !isMapStable || !isDrawingCustomRoute) {
+    if (!map || mode !== "create" || !waitingForStart || !isDrawingCustomRoute) {
       return;
     }
 
-    const clickListener = map.addListener("click", (e: google.maps.MapMouseEvent) => {
+    // Ensure we have origin and destination before allowing drawing
+    if (!searchOrigin || !searchDestination) {
+      return;
+    }
+
+    // Also allow clicking anywhere on map to start (as fallback)
+    const mapClickListener = map.addListener("mousedown", (e: google.maps.MapMouseEvent) => {
       if (!e.latLng) return;
-      
-      const lat = e.latLng.lat();
-      const lng = e.latLng.lng();
-      
-      // Set start point immediately
-      setDrawingPath([{ lat, lng }]);
-      setWaitingForStart(false);
-      setIsDrawing(true);
-      
-      // Create polyline
-      const newPolyline = new google.maps.Polyline({
-        path: [{ lat, lng }],
-        strokeColor: "#4285F4",
-        strokeWeight: 4,
-        map,
-      });
-      setPolyline(newPolyline);
+      // Start drawing from origin when clicking anywhere on map
+      startDrawingFromOrigin();
     });
 
     return () => {
-      google.maps.event.removeListener(clickListener);
+      google.maps.event.removeListener(mapClickListener);
     };
-  }, [map, mode, waitingForStart, isMapStable, isDrawingCustomRoute]);
+  }, [map, mode, waitingForStart, isDrawingCustomRoute, searchOrigin, searchDestination, startDrawingFromOrigin]);
 
-  // Create mode: Handle route drawing
+  // Create mode: Handle cursor styling when drawing (drag-based drawing is handled above)
   useEffect(() => {
-    if (!map || mode !== "create" || !isDrawing) return;
+    if (!map || mode !== "create" || !isDrawing) {
+      if (map) {
+        map.setOptions({ draggable: true });
+      }
+      return;
+    }
 
-    // Disable map dragging
+    // Disable map dragging while drawing
     map.setOptions({ draggable: false });
     
     // Force cursor to crosshair on map and all child elements
@@ -399,98 +683,10 @@ export default function MapComponent({
       }
     }
 
-    const moveListener = map.addListener("mousemove", (e: google.maps.MapMouseEvent) => {
-      if (!e.latLng) return;
-      const lat = e.latLng.lat();
-      const lng = e.latLng.lng();
-      
-      // Pan map to follow cursor (keep cursor centered)
-      const mapDiv = map.getDiv();
-      const bounds = map.getBounds();
-      if (bounds) {
-        const ne = bounds.getNorthEast();
-        const sw = bounds.getSouthWest();
-        const latRange = ne.lat() - sw.lat();
-        const lngRange = ne.lng() - sw.lng();
-        
-        // Define a buffer zone - if cursor gets within 20% of edge, pan the map
-        const bufferLat = latRange * 0.2;
-        const bufferLng = lngRange * 0.2;
-        
-        const center = map.getCenter();
-        if (center) {
-          let needsPan = false;
-          let newLat = center.lat();
-          let newLng = center.lng();
-          
-          if (lat > ne.lat() - bufferLat) {
-            newLat = lat + bufferLat;
-            needsPan = true;
-          } else if (lat < sw.lat() + bufferLat) {
-            newLat = lat - bufferLat;
-            needsPan = true;
-          }
-          
-          if (lng > ne.lng() - bufferLng) {
-            newLng = lng + bufferLng;
-            needsPan = true;
-          } else if (lng < sw.lng() + bufferLng) {
-            newLng = lng - bufferLng;
-            needsPan = true;
-          }
-          
-          if (needsPan) {
-            map.panTo({ lat: newLat, lng: newLng });
-          }
-        }
-      }
-      
-      setDrawingPath((prev) => {
-        const newPath = [...prev, { lat, lng }];
-        
-        // Update polyline
-        if (polyline) {
-          polyline.setPath(newPath);
-        }
-        
-        return newPath;
-      });
-    });
-
-    const clickListener = map.addListener("click", () => {
-      // Stop drawing
-      setIsDrawing(false);
-      map.setOptions({ draggable: true });
-      
-      // Reset cursor on map container and all child elements
-      if (mapRef.current) {
-        mapRef.current.style.cursor = "";
-        const mapDiv = map.getDiv();
-        if (mapDiv) {
-          mapDiv.style.cursor = "";
-          // Reset cursor on all child elements
-          const allElements = mapDiv.querySelectorAll("*");
-          allElements.forEach((el: Element) => {
-            (el as HTMLElement).style.cursor = "";
-          });
-        }
-      }
-      
-      // Snap to roads and update
-      if (drawingPath.length > 1) {
-        snapPathToRoads(drawingPath);
-      }
-      
-      // Notify parent that custom drawing is complete
-      if (onCustomDrawComplete) {
-        onCustomDrawComplete();
-      }
-    });
-
     return () => {
-      google.maps.event.removeListener(moveListener);
-      google.maps.event.removeListener(clickListener);
-      map.setOptions({ draggable: true });
+      if (map) {
+        map.setOptions({ draggable: true });
+      }
       if (mapRef.current) {
         mapRef.current.style.cursor = "";
         const mapDiv = map.getDiv();
@@ -503,7 +699,7 @@ export default function MapComponent({
         }
       }
     };
-  }, [map, mode, isDrawing, polyline, drawingPath, snapPathToRoads, onCustomDrawComplete]);
+  }, [map, mode, isDrawing]);
 
   const resetDrawing = () => {
     setIsDrawing(false);
@@ -526,32 +722,18 @@ export default function MapComponent({
     // Reset cursor on map container
     if (mapRef.current) {
       mapRef.current.style.cursor = "";
+      mapRef.current.classList.remove("drawing-mode");
     }
     
     if (polyline) {
       polyline.setMap(null);
       setPolyline(null);
+      polylineRef.current = null;
     }
     
-    if (marker) {
-      marker.setMap(null);
-      setMarker(null);
-    }
-
-    // Clear search markers
-    if (originMarker) {
-      originMarker.setMap(null);
-      setOriginMarker(null);
-    }
-
-    if (destMarker) {
-      destMarker.setMap(null);
-      setDestMarker(null);
-    }
-    
-    onPathChange?.([]);
-    if (onDestinationChange) {
-      onDestinationChange({ lat: 0, lng: 0 });
+    // Notify parent that drawing is cancelled
+    if (onCustomDrawComplete) {
+      onCustomDrawComplete();
     }
   };
 
@@ -559,29 +741,48 @@ export default function MapComponent({
     <div className="relative h-full w-full">
       <div 
         ref={mapRef} 
-        className="h-full w-full"
+        className={`h-full w-full ${isDrawingCustomRoute ? 'drawing-mode' : ''}`}
         style={{
-          cursor: (isDrawingCustomRoute && (waitingForStart || isDrawing)) ? "crosshair !important" : "default"
+          cursor: (isDrawingCustomRoute && (waitingForStart || isDrawing)) ? "crosshair" : "default"
         } as React.CSSProperties}
       />
-      {mode === "create" && isDrawingCustomRoute && (waitingForStart || isDrawing) && (
-        <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-2">
-          <div className="rounded-lg bg-white px-6 py-3 shadow-lg">
-            <p className="text-sm font-medium text-gray-900">
-              {waitingForStart
-                ? "🎯 Click on map to start drawing..."
-                : "✏️ Drawing... click again to finish"}
-            </p>
+      {mode === "create" && isDrawingCustomRoute && (
+        <>
+          {/* Visual indicator overlay */}
+          <div className="absolute inset-0 pointer-events-none z-10 flex items-center justify-center">
+            <div className="rounded-lg bg-blue-600/90 text-white px-6 py-4 shadow-2xl border-2 border-blue-400 max-w-md">
+              <p className="text-lg font-bold text-center">
+                {waitingForStart
+                  ? "🎯 Click on Point A (blue marker), then drag to Point B to draw your route"
+                  : isDrawing
+                  ? "✏️ Dragging... Release mouse button to finish drawing"
+                  : ""}
+              </p>
+            </div>
           </div>
-          <button
-            onClick={resetDrawing}
-            className="rounded-lg bg-gray-600 px-4 py-2 text-white shadow-lg hover:bg-gray-700"
-          >
-            Cancel
-          </button>
-        </div>
+          
+          {/* Bottom controls */}
+          {(waitingForStart || isDrawing) && (
+            <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-2 z-20">
+              <div className="rounded-lg bg-white px-6 py-3 shadow-lg border-2 border-blue-500">
+                <p className="text-sm font-medium text-gray-900">
+                  {waitingForStart
+                    ? "🎯 Click Point A marker, then drag to draw route"
+                    : "✏️ Dragging... Release to finish"}
+                </p>
+              </div>
+              <button
+                onClick={resetDrawing}
+                className="rounded-lg bg-gray-600 px-4 py-2 text-white shadow-lg hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
+
 

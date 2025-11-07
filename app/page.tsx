@@ -87,6 +87,72 @@ export default function HomePage() {
     setPath([]); // Clear any existing path
   };
 
+  const drawDirectRoute = () => {
+    if (!searchOrigin || !searchDestination) return;
+    
+    // Create a simple path from origin to destination
+    // This will be a straight line, but you can also use Directions API for road routes
+    const directPath = [
+      { lat: searchOrigin.lat, lng: searchOrigin.lng },
+      { lat: searchDestination.lat, lng: searchDestination.lng }
+    ];
+    
+    setPath(directPath);
+    setDestination({ lat: searchDestination.lat, lng: searchDestination.lng });
+  };
+
+  const drawRouteWithDirections = async () => {
+    if (!searchOrigin || !searchDestination) return;
+    
+    // Check if Google Maps is loaded
+    if (typeof window === "undefined" || !window.google || !window.google.maps) {
+      console.error("Google Maps not loaded");
+      drawDirectRoute();
+      return;
+    }
+    
+    try {
+      // Use Google Directions API to get a route that follows roads
+      const directionsService = new window.google.maps.DirectionsService();
+      
+      await new Promise<void>((resolve, reject) => {
+        directionsService.route(
+          {
+            origin: { lat: searchOrigin.lat, lng: searchOrigin.lng },
+            destination: { lat: searchDestination.lat, lng: searchDestination.lng },
+            travelMode: window.google.maps.TravelMode.DRIVING,
+          },
+          (result, status) => {
+            if (status === window.google.maps.DirectionsStatus.OK && result) {
+              const route = result.routes[0];
+              const path: LatLng[] = [];
+              
+              // Extract path from the route
+              route.legs.forEach((leg) => {
+                leg.steps.forEach((step) => {
+                  step.path.forEach((point) => {
+                    path.push({ lat: point.lat(), lng: point.lng() });
+                  });
+                });
+              });
+
+              setPath(path);
+              setDestination({ lat: searchDestination.lat, lng: searchDestination.lng });
+              resolve();
+            } else {
+              console.error("Directions request failed:", status);
+              reject(new Error(`Directions request failed: ${status}`));
+            }
+          }
+        );
+      });
+    } catch (error) {
+      console.error("Error getting directions:", error);
+      // Fallback to direct line if Directions API fails
+      drawDirectRoute();
+    }
+  };
+
   return (
     <GoogleMapsLoader>
       <div className="flex h-screen flex-col">
@@ -106,6 +172,7 @@ export default function HomePage() {
               searchDestination={searchDestination}
               waypoints={waypoints}
               isDrawingCustomRoute={isDrawingCustomRoute}
+              currentPath={path}
               onDestinationChange={setDestination}
               onPathChange={setPath}
               onCustomDrawComplete={() => setIsDrawingCustomRoute(false)}
@@ -178,14 +245,26 @@ export default function HomePage() {
         </div>
                 )}
 
-                {/* Draw Route Button */}
+                {/* Route Drawing Buttons */}
                 {searchOrigin && searchDestination && !isDrawingCustomRoute && (
                   <div className="space-y-2">
+                    <button
+                      onClick={drawRouteWithDirections}
+                      className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                    >
+                      🗺️ Draw Route (A to B)
+                    </button>
+                    <button
+                      onClick={drawDirectRoute}
+                      className="w-full rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700"
+                    >
+                      📏 Draw Straight Line (A to B)
+                    </button>
                     <button
                       onClick={startDrawing}
                       className="w-full rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-700"
                     >
-                      ✏️ Draw Route
+                      ✏️ Draw Custom Route
                     </button>
                   </div>
                 )}
@@ -197,11 +276,10 @@ export default function HomePage() {
                   <ol className="mt-2 space-y-1 text-xs text-blue-800">
                     <li>1. Search for your starting point (A)</li>
                     <li>2. Search for your destination (B)</li>
-                    <li>3. Optionally add waypoints in between</li>
-                    <li>4. Click &quot;Draw Route&quot; button</li>
-                    <li>5. Click on the map to start drawing your route</li>
-                    <li>6. Move your mouse to draw, click again to finish</li>
-                    <li>7. Add note and share!</li>
+                    <li>3. Click &quot;Draw Route (A to B)&quot; for automatic route</li>
+                    <li>4. Or click &quot;Draw Straight Line&quot; for direct line</li>
+                    <li>5. Or click &quot;Draw Custom Route&quot; to draw manually</li>
+                    <li>6. Add note and share!</li>
                   </ol>
                 </div>
               ) : null}

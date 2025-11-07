@@ -24,3 +24,11 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Force crosshair cursor in drawing mode */
+.drawing-mode,
+.drawing-mode *,
+.drawing-mode *::before,
+.drawing-mode *::after {
+  cursor: crosshair !important;
+}
