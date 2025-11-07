@@ -1,0 +1,40 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Share {
+  id              String   @id @default(cuid())
+  routeType       String   @default("general") // "general" or "microroute"
+  
+  // General route fields (backward compatible)
+  destLat         Float
+  destLng         Float
+  encodedPolyline String
+  
+  // X→Y micro-route fields (optional)
+  xLat            Float?
+  xLng            Float?
+  yLat            Float?
+  yLng            Float?
+  encodedXY       String?
+  
+  note            String?
+  ttlHours        Int      @default(24) // 1-72 hours
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([expiresAt])
+  @@index([routeType])
+}
