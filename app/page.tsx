@@ -83,7 +83,14 @@ export default function HomePage() {
   };
 
   const startDrawing = () => {
+    if (!searchOrigin || !searchDestination) {
+      setError("Please set both starting point (A) and destination (B) before drawing a custom route.");
+      return;
+    }
+
+    setError(null);
     setIsDrawingCustomRoute(true);
+    setDestination({ lat: searchDestination.lat, lng: searchDestination.lng });
     setPath([]); // Clear any existing path
   };
 

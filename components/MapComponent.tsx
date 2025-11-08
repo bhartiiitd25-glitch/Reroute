@@ -3,6 +3,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { LatLng } from "@/lib/polyline";
 
+const PENCIL_ICON_URL =
+  "data:image/svg+xml;charset=UTF-8," +
+  encodeURIComponent(
+    `<svg width="96" height="96" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
+      <g filter="url(#shadow)">
+        <path d="M48 88 L42 70 L54 70 Z" fill="#1d4ed8"/>
+        <circle cx="48" cy="88" r="6" fill="#1d4ed8"/>
+      </g>
+      <g transform="translate(28 18) rotate(-35 20 20)">
+        <rect x="18" y="0" width="12" height="36" rx="4" fill="#fcd34d"/>
+        <rect x="18" y="0" width="12" height="12" rx="4" fill="#fbbf24"/>
+        <polygon points="24,-6 16,0 32,0" fill="#f59e0b"/>
+        <polygon points="24,36 16,50 24,56 32,50" fill="#4b5563"/>
+        <polygon points="24,50 20,58 24,62 28,58" fill="#111827"/>
+      </g>
+      <defs>
+        <filter id="shadow" x="32" y="64" width="32" height="32" filterUnits="userSpaceOnUse">
+          <feOffset dy="2" />
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.2 0"/>
+        </filter>
+      </defs>
+    </svg>`
+  );
+
 interface MapComponentProps {
   mode: "create" | "view";
   destination?: LatLng;
@@ -44,6 +69,7 @@ export default function MapComponent({
   const [originMarker, setOriginMarker] = useState<google.maps.Marker | null>(null);
   const [destMarker, setDestMarker] = useState<google.maps.Marker | null>(null);
   const [isMapStable, setIsMapStable] = useState(false);
+  const pencilMarkerRef = useRef<google.maps.Marker | null>(null);
 
   // Initialize map
   useEffect(() => {
@@ -107,7 +133,14 @@ export default function MapComponent({
 
     // Add click listener to origin marker when in drawing mode
     let markerClickListener: google.maps.MapsEventListener | null = null;
+    let markerMouseDownListener: google.maps.MapsEventListener | null = null;
     if (isDrawingCustomRoute && waitingForStart) {
+      markerMouseDownListener = newOriginMarker.addListener("mousedown", (e: google.maps.MapMouseEvent) => {
+        e.stop(); // Prevent event propagation
+        if (map && searchOrigin && searchDestination) {
+          startDrawingFromOrigin(true);
+        }
+      });
       markerClickListener = newOriginMarker.addListener("click", (e: google.maps.MapMouseEvent) => {
         e.stop(); // Prevent event propagation
         // Start drawing from origin when marker is clicked
@@ -129,10 +162,56 @@ export default function MapComponent({
       if (markerClickListener) {
         google.maps.event.removeListener(markerClickListener);
       }
+      if (markerMouseDownListener) {
+        google.maps.event.removeListener(markerMouseDownListener);
+      }
       newOriginMarker.setMap(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, searchOrigin, isDrawingCustomRoute, waitingForStart]);
+
+  // Show pencil icon pointing at origin during custom draw setup
+  useEffect(() => {
+    if (!map) return;
+
+    if (!isDrawingCustomRoute || !waitingForStart || !searchOrigin) {
+      if (pencilMarkerRef.current) {
+        pencilMarkerRef.current.setMap(null);
+        pencilMarkerRef.current = null;
+      }
+      return;
+    }
+
+    const icon: google.maps.Icon = {
+      url: PENCIL_ICON_URL,
+      scaledSize: new google.maps.Size(64, 64),
+      anchor: new google.maps.Point(32, 60),
+    };
+
+    if (pencilMarkerRef.current) {
+      pencilMarkerRef.current.setIcon(icon);
+      pencilMarkerRef.current.setPosition({ lat: searchOrigin.lat, lng: searchOrigin.lng });
+      pencilMarkerRef.current.setMap(map);
+      pencilMarkerRef.current.setZIndex(900);
+    } else {
+      pencilMarkerRef.current = new google.maps.Marker({
+        position: { lat: searchOrigin.lat, lng: searchOrigin.lng },
+        map,
+        icon,
+        clickable: false,
+        zIndex: 900,
+        opacity: 0.9,
+        optimized: false,
+      });
+    }
+
+    return () => {
+      if (pencilMarkerRef.current) {
+        pencilMarkerRef.current.setMap(null);
+        pencilMarkerRef.current = null;
+      }
+    };
+  }, [map, isDrawingCustomRoute, waitingForStart, searchOrigin]);
 
   // Handle destination search location
   useEffect(() => {
@@ -453,7 +532,7 @@ export default function MapComponent({
   }, [map, isDrawingCustomRoute, isMapStable, polyline]);
 
   // Shared function to start drawing from origin
-  const startDrawingFromOrigin = useCallback(() => {
+  const startDrawingFromOrigin = useCallback((startDragImmediately = false) => {
     if (!map || !searchOrigin || !searchDestination) return;
 
     setWaitingForStart(false);
@@ -481,7 +560,7 @@ export default function MapComponent({
     polylineRef.current = newPolyline;
 
     // Set up drag listeners - start listening immediately for mousemove
-    let isDragging = false;
+    let isDragging = startDragImmediately;
     let moveListener: google.maps.MapsEventListener | null = null;
     let mouseUpListener: google.maps.MapsEventListener | null = null;
     let globalMouseUpHandler: ((e: MouseEvent) => void) | null = null;
@@ -647,7 +726,7 @@ export default function MapComponent({
     const mapClickListener = map.addListener("mousedown", (e: google.maps.MapMouseEvent) => {
       if (!e.latLng) return;
       // Start drawing from origin when clicking anywhere on map
-      startDrawingFromOrigin();
+      startDrawingFromOrigin(true);
     });
 
     return () => {
@@ -731,6 +810,11 @@ export default function MapComponent({
       polylineRef.current = null;
     }
     
+    if (pencilMarkerRef.current) {
+      pencilMarkerRef.current.setMap(null);
+      pencilMarkerRef.current = null;
+    }
+    
     // Notify parent that drawing is cancelled
     if (onCustomDrawComplete) {
       onCustomDrawComplete();
@@ -747,39 +831,17 @@ export default function MapComponent({
         } as React.CSSProperties}
       />
       {mode === "create" && isDrawingCustomRoute && (
-        <>
-          {/* Visual indicator overlay */}
-          <div className="absolute inset-0 pointer-events-none z-10 flex items-center justify-center">
-            <div className="rounded-lg bg-blue-600/90 text-white px-6 py-4 shadow-2xl border-2 border-blue-400 max-w-md">
-              <p className="text-lg font-bold text-center">
-                {waitingForStart
-                  ? "🎯 Click on Point A (blue marker), then drag to Point B to draw your route"
-                  : isDrawing
-                  ? "✏️ Dragging... Release mouse button to finish drawing"
-                  : ""}
-              </p>
-            </div>
+        <div className="pointer-events-none absolute bottom-4 left-4 z-20 flex items-center gap-3">
+          <div className="pointer-events-auto rounded-lg bg-white/95 px-4 py-2 text-xs font-medium text-gray-700 shadow-lg">
+            {waitingForStart ? "Drag from A to B to sketch your route." : isDrawing ? "Release to finish your custom route." : ""}
           </div>
-          
-          {/* Bottom controls */}
-          {(waitingForStart || isDrawing) && (
-            <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-2 z-20">
-              <div className="rounded-lg bg-white px-6 py-3 shadow-lg border-2 border-blue-500">
-                <p className="text-sm font-medium text-gray-900">
-                  {waitingForStart
-                    ? "🎯 Click Point A marker, then drag to draw route"
-                    : "✏️ Dragging... Release to finish"}
-                </p>
-              </div>
-              <button
-                onClick={resetDrawing}
-                className="rounded-lg bg-gray-600 px-4 py-2 text-white shadow-lg hover:bg-gray-700"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-        </>
+          <button
+            onClick={resetDrawing}
+            className="pointer-events-auto rounded-lg bg-gray-600 px-3 py-2 text-xs font-semibold text-white shadow-lg hover:bg-gray-700"
+          >
+            Cancel
+          </button>
+        </div>
       )}
     </div>
   );
